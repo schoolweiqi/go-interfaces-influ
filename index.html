@@ -37,12 +37,17 @@ p { margin: 8px 0; }
       <option value="2">Белый</option>
       <option value="0">Ластик</option>
     </select></label>
+    <label>Модель <select id="model">
+      <option value="ladder">По исходам ситё</option>
+      <option value="geometry">Геометрические коридоры</option>
+    </select></label>
     <label><input type="checkbox" id="influence" checked> Влияние</label>
     <label><input type="checkbox" id="mirror" checked> Зеркало</label>
     <label><input type="checkbox" id="numbers"> Числа</label>
   </div>
   <canvas id="board" width="800" height="800" tabindex="0" aria-label="Гобан 19 на 19. Стрелки выбирают пункт, Enter ставит камень."></canvas>
   <p id="point" class="legend"></p>
+  <p id="probes" class="legend" title="Крестики / квадратики. 1 — выход, 0 — захват, — неприменимо, ? — не решено."></p>
   <p id="status" class="legend" role="status"></p>
   <p class="legend">Свободная расстановка. Синий — перевес чёрных, красный — белых, фиолетовый — равное ненулевое влияние.</p>
 </main>
@@ -166,6 +171,141 @@ function calculate(board, mirror) {
   return masks;
 }
 
+const CAPTURED = 0;
+const ESCAPED = 1;
+const INAPPLICABLE = 2;
+const UNRESOLVED = 3;
+const ladderNames = ['↘', '↙', '↖', '↗'];
+const ladderNeighbors = Array.from({ length: area }, (_, p) => {
+  const x = p % size;
+  const y = Math.floor(p / size);
+  return [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]
+    .filter(([nx, ny]) => nx >= 0 && ny >= 0 && nx < size && ny < size)
+    .map(([nx, ny]) => ny * size + nx);
+});
+
+function inspectChain(board, start) {
+  const color = board[start];
+  const stones = new Set([start]);
+  const liberties = new Set();
+  for (const stone of stones) {
+    for (const next of ladderNeighbors[stone]) {
+      if (!board[next]) liberties.add(next);
+      else if (board[next] === color) stones.add(next);
+    }
+  }
+  return { stones, liberties };
+}
+
+function playLadderMove(board, point, color) {
+  if (board[point]) return null;
+  const next = board.slice();
+  next[point] = color;
+  for (const neighbor of ladderNeighbors[point]) {
+    if (next[neighbor] !== 3 - color) continue;
+    const chain = inspectChain(next, neighbor);
+    if (!chain.liberties.size) for (const stone of chain.stones) next[stone] = 0;
+  }
+  return inspectChain(next, point).liberties.size ? next : null;
+}
+
+function readLadder(board, anchor, runner) {
+  const path = new Set();
+  let remaining = 256;
+  function search(current, defending) {
+    if (current[anchor] !== runner) return CAPTURED;
+    const chain = inspectChain(current, anchor);
+    const n = chain.liberties.size;
+    if (!n) return CAPTURED;
+    if (n >= 3 || (defending && n >= 2)) return ESCAPED;
+    if (--remaining < 0) return UNRESOLVED;
+    const key = Number(defending) + ':' + String.fromCharCode(...current);
+    if (path.has(key)) return UNRESOLVED;
+    path.add(key);
+    const moves = new Set(chain.liberties);
+    if (defending) {
+      for (const stone of chain.stones) {
+        for (const neighbor of ladderNeighbors[stone]) {
+          if (current[neighbor] !== 3 - runner) continue;
+          const enemy = inspectChain(current, neighbor);
+          if (enemy.liberties.size === 1) {
+            for (const liberty of enemy.liberties) moves.add(liberty);
+          }
+        }
+      }
+    }
+    const best = defending ? ESCAPED : CAPTURED;
+    let result = defending ? CAPTURED : ESCAPED;
+    for (const move of moves) {
+      const next = playLadderMove(current, move, defending ? runner : 3 - runner);
+      if (!next) continue;
+      if (!defending && next[anchor] === runner && inspectChain(next, anchor).liberties.size > 1) continue;
+      const branch = search(next, !defending);
+      if (branch === best) { result = best; break; }
+      if (branch === UNRESOLVED) result = UNRESOLVED;
+    }
+    path.delete(key);
+    return result;
+  }
+  return search(board, true);
+}
+
+function probeLadder(board, anchor, runner, sx, sy, phase) {
+  const x = anchor % size;
+  const y = Math.floor(anchor / size);
+  const fx = phase === 0 ? sx : 0;
+  const fy = phase === 0 ? 0 : sy;
+  const tx = phase === 0 ? 0 : sx;
+  const ty = phase === 0 ? sy : 0;
+  const blocks = [[-fx, -fy], [-tx, -ty], [tx, ty], [fx - tx, fy - ty]];
+  if (board[anchor] && board[anchor] !== runner) return INAPPLICABLE;
+  const start = board.slice();
+  start[anchor] = runner;
+  for (const [dx, dy] of blocks) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+    const point = ny * size + nx;
+    if (start[point] === runner) return INAPPLICABLE;
+    start[point] = 3 - runner;
+  }
+
+  // Setup stones describe the probe before the first defensive move.
+  for (const [dx, dy] of blocks) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+    if (!inspectChain(start, ny * size + nx).liberties.size) return INAPPLICABLE;
+  }
+  const chain = inspectChain(start, anchor);
+  const forward = x + fx;
+  const down = y + fy;
+  if (forward < 0 || down < 0 || forward >= size || down >= size ||
+      chain.liberties.size !== 1 || !chain.liberties.has(down * size + forward)) {
+    return INAPPLICABLE;
+  }
+  return readLadder(start, anchor, runner);
+}
+
+function calculateLadders(board) {
+  const probes = [null, [], []];
+  const totals = [null, new Uint8Array(area), new Uint8Array(area)];
+  for (const color of [1, 2]) {
+    for (const [sx, sy] of directions) {
+      const matrix = new Uint8Array(area * 2);
+      for (let anchor = 0; anchor < area; anchor++) {
+        for (let phase = 0; phase < 2; phase++) {
+          const outcome = probeLadder(board, anchor, color, sx, sy, phase);
+          matrix[anchor * 2 + phase] = outcome;
+          if (outcome === ESCAPED) totals[color][anchor]++;
+        }
+      }
+      probes[color].push(matrix);
+    }
+  }
+  return { probes, totals };
+}
+
 const get = id => document.getElementById(id);
 const canvas = get('board');
 const ctx = canvas.getContext('2d');
@@ -173,7 +313,9 @@ let history = [{ board: new Uint8Array(area), next: 1, last: -1 }];
 let cursor = 0;
 let selected = 9 * size + 9;
 let hovered = null;
-let masks;
+let totals;
+let ladderResults;
+let calculatedModel;
 let calculatedFrame;
 let calculatedMirror;
 const position = () => history[cursor];
@@ -189,11 +331,17 @@ function circle(x, y, radius, fill) {
 
 function draw() {
   const frame = position();
-  const mirror = get('mirror').checked;
-  if (frame !== calculatedFrame || mirror !== calculatedMirror) {
-    masks = calculate(frame.board, mirror);
+  const model = get('model').value;
+  const isLadder = model === 'ladder';
+  get('mirror').disabled = isLadder;
+  const mirror = !isLadder && get('mirror').checked;
+  if (frame !== calculatedFrame || mirror !== calculatedMirror || model !== calculatedModel) {
+    ladderResults = isLadder ? calculateLadders(frame.board) : null;
+    totals = ladderResults?.totals ?? calculate(frame.board, mirror).map(field =>
+      field && field.map(mask => counts[mask]));
     calculatedFrame = frame;
     calculatedMirror = mirror;
+    calculatedModel = model;
   }
   const influence = get('influence').checked;
   const numbers = get('numbers').checked;
@@ -202,12 +350,12 @@ function draw() {
   if (influence) {
     frame.board.forEach((color, index) => {
       if (color) return;
-      const black = counts[masks[1][index]];
-      const white = counts[masks[2][index]];
+      const black = totals[1][index];
+      const white = totals[2][index];
       if (!black && !white) return;
       const difference = black - white;
       const rgb = difference > 0 ? '46,83,159' : difference < 0 ? '170,46,43' : '118,64,146';
-      const alpha = .1 + .11 * (Math.abs(difference) || black);
+      const alpha = .1 + (isLadder ? .055 : .11) * (Math.abs(difference) || black);
       const x = margin + (index % size) * spacing;
       const y = margin + Math.floor(index / size) * spacing;
       ctx.fillStyle = 'rgba(' + rgb + ',' + alpha + ')';
@@ -247,8 +395,8 @@ function draw() {
       circle(x, y, 18.5, gradient);
       if (index === frame.last) circle(x, y, 4, color === 1 ? '#fff' : '#282218');
     } else if (influence && numbers) {
-      const delta = counts[masks[1][index]] - counts[masks[2][index]];
-      if (!delta && !masks[1][index]) return;
+      const delta = totals[1][index] - totals[2][index];
+      if (!delta && !totals[1][index]) return;
       ctx.fillStyle = '#201d27';
       ctx.font = 'bold 16px system-ui';
       ctx.fillText(delta > 0 ? '+' + delta : delta, x + 9, y - 9);
@@ -268,12 +416,18 @@ function showPoint(index) {
   let detail = 'Выберите пункт, чтобы увидеть значения влияния.';
   if (index !== null) {
     const color = position().board[index];
-    const black = counts[masks[1][index]];
-    const white = counts[masks[2][index]];
+    const black = totals[1][index];
+    const white = totals[2][index];
     detail = coordinate(index) + ' · ' + (color ? stoneName(color) + ' камень' :
       'чёрные ' + black + ' · белые ' + white + ' · разность ' + (black - white));
   }
   get('point').textContent = detail;
+  const symbols = ['0', '1', '—', '?'];
+  get('probes').textContent = ladderResults && index !== null ?
+    [1, 2].map(color => stoneName(color) + ': ' +
+      ladderResults.probes[color].map((matrix, d) => ladderNames[d] + ' ' +
+        symbols[matrix[index * 2]] + '/' + symbols[matrix[index * 2 + 1]]).join(' · '))
+      .join(' | ') : '';
 }
 
 function render() {
@@ -350,7 +504,7 @@ get('back').onclick = () => goTo(cursor - 1);
 get('forward').onclick = () => goTo(cursor + 1);
 get('last').onclick = () => goTo(history.length - 1);
 get('clear').onclick = () => record({ board: new Uint8Array(area), next: 1, last: -1 });
-for (const id of ['tool', 'influence', 'mirror', 'numbers']) get(id).onchange = render;
+for (const id of ['tool', 'model', 'influence', 'mirror', 'numbers']) get(id).onchange = render;
 render();
 </script>
 </body>
