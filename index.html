@@ -78,6 +78,22 @@ function kernel(dx, dy) {
   return kernels[(dy + offset) * width + dx + offset];
 }
 
+// Near a wall, the outermost diagonal parallel to that wall loses its ladder support.
+function blockedLadderDirections(source, dx, dy) {
+  const displacement = [dx, dy];
+  let blocked = 0;
+  for (const [axis, edge] of boundaries) {
+    if (Math.abs(source[axis] - edge) > 2) continue;
+    const inward = edge === 0 ? 1 : -1;
+    const normal = inward * displacement[axis];
+    const tangent = displacement[1 - axis];
+    if (normal < 0 || Math.abs(tangent) - normal !== 2) continue;
+    const parallel = Math.sign(tangent);
+    blocked |= axis === 0 ? kernel(inward, parallel) : kernel(parallel, inward);
+  }
+  return blocked;
+}
+
 function chains(board) {
   const seen = new Uint8Array(area);
   const groups = [];
@@ -111,8 +127,12 @@ function calculate(board, mirror) {
   });
   for (const { color, stones } of chains(board)) {
     const field = masks[color];
-    for (const [sx, sy] of stones) {
-      for (const [index, x, y] of empty) field[index] |= kernel(x - sx, y - sy);
+    for (const source of stones) {
+      const [sx, sy] = source;
+      for (const [index, x, y] of empty) {
+        const direct = kernel(x - sx, y - sy);
+        if (direct) field[index] |= direct & ~blockedLadderDirections(source, x - sx, y - sy);
+      }
     }
     if (!mirror) continue;
     for (const [axis, edge] of boundaries) {
@@ -130,8 +150,13 @@ function calculate(board, mirror) {
           const reflected = target.slice();
           reflected[axis] = 2 * edge - target[axis];
           for (const [index, x, y] of empty) {
-            if (kernel(x - source[0], y - source[1])) {
-              field[index] |= kernel(x - reflected[0], y - reflected[1]);
+            const dx = x - source[0];
+            const dy = y - source[1];
+            const direct = kernel(dx, dy);
+            if (!direct) continue;
+            const blocked = blockedLadderDirections(source, dx, dy);
+            if (direct & ~blocked) {
+              field[index] |= kernel(x - reflected[0], y - reflected[1]) & ~blocked;
             }
           }
         }
