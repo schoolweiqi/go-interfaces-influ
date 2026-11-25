@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Коридоры влияния · Го</title>
+<style>
+:root { color-scheme: light; font: 16px system-ui, sans-serif; color: #282218; background: #f7f3ea; }
+body { margin: 0; }
+main { max-width: 740px; margin: auto; padding: 16px; }
+h1 { font-family: Georgia, serif; font-size: clamp(1.6rem, 5vw, 2.4rem); margin: 0 0 14px; }
+nav, .options { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 10px; }
+button, select { font: inherit; padding: 6px 10px; border: 1px solid #b9a98d; border-radius: 6px; background: #fffdf7; color: inherit; }
+button:disabled { opacity: .45; }
+button:focus-visible, select:focus-visible, canvas:focus-visible, input:focus-visible { outline: 2px solid #3159a1; outline-offset: 2px; }
+canvas { display: block; width: 100%; height: auto; border-radius: 8px; cursor: crosshair; }
+p { margin: 8px 0; }
+.legend { color: #544936; font-size: .9rem; }
+#status, #point { min-height: 1.4em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Коридоры влияния</h1>
+  <nav aria-label="История расстановки">
+    <button id="first" title="В начало">⏮</button>
+    <button id="back">← Назад</button>
+    <button id="forward">Вперёд →</button>
+    <button id="last" title="В конец">⏭</button>
+    <output id="step" aria-live="polite"></output>
+    <button id="clear">Очистить</button>
+  </nav>
+  <div class="options">
+    <label>Камень <select id="tool">
+      <option value="alternate">Чередовать</option>
+      <option value="1">Чёрный</option>
+      <option value="2">Белый</option>
+      <option value="0">Ластик</option>
+    </select></label>
+    <label><input type="checkbox" id="influence" checked> Влияние</label>
+    <label><input type="checkbox" id="mirror" checked> Зеркало</label>
+    <label><input type="checkbox" id="numbers"> Числа</label>
+  </div>
+  <canvas id="board" width="800" height="800" tabindex="0" aria-label="Гобан 19 на 19. Стрелки выбирают пункт, Enter ставит камень."></canvas>
+  <p id="point" class="legend"></p>
+  <p id="status" class="legend" role="status"></p>
+  <p class="legend">Свободная расстановка. Синий — перевес чёрных, красный — белых, фиолетовый — равное ненулевое влияние.</p>
+</main>
+<script>
+'use strict';
+const size = 19;
+const area = size * size;
+const margin = 40;
+const spacing = 40;
+const letters = 'ABCDEFGHJKLMNOPQRST';
+const directions = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
+const counts = Array.from({ length: 16 }, (_, mask) =>
+  directions.filter((_, index) => mask & (1 << index)).length);
+const boundaries = [[0, 0], [0, size - 1], [1, 0], [1, size - 1]];
+
+function corridor(dx, dy) {
+  let mask = 0;
+  directions.forEach(([a, b], index) => {
+    const x = a * dx;
+    const y = b * dy;
+    if (x >= 0 && y >= 0 && Math.abs(x - y) <= 2) mask |= 1 << index;
+  });
+  return mask;
+}
+
+const extent = 2 * size - 1;
+const offset = extent - 1;
+const width = extent * 2 - 1;
+const kernels = Uint8Array.from({ length: width * width }, (_, index) =>
+  corridor(index % width - offset, Math.floor(index / width) - offset));
+
+function kernel(dx, dy) {
+  return kernels[(dy + offset) * width + dx + offset];
+}
+
+function chains(board) {
+  const seen = new Uint8Array(area);
+  const groups = [];
+  board.forEach((color, index) => {
+    if (!color || seen[index]) return;
+    const queue = [index];
+    seen[index] = 1;
+    const stones = [];
+    for (const point of queue) {
+      const x = point % size;
+      const y = Math.floor(point / size);
+      stones.push([x, y]);
+      for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+        if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+        const next = ny * size + nx;
+        if (board[next] !== color || seen[next]) continue;
+        seen[next] = 1;
+        queue.push(next);
+      }
+    }
+    groups.push({ color, stones });
+  });
+  return groups;
+}
+
+function calculate(board, mirror) {
+  const masks = [null, new Uint8Array(area), new Uint8Array(area)];
+  const empty = [];
+  board.forEach((color, index) => {
+    if (!color) empty.push([index, index % size, Math.floor(index / size)]);
+  });
+  for (const { color, stones } of chains(board)) {
+    const field = masks[color];
+    for (const [sx, sy] of stones) {
+      for (const [index, x, y] of empty) field[index] |= kernel(x - sx, y - sy);
+    }
+    if (!mirror) continue;
+    for (const [axis, edge] of boundaries) {
+      const along = 1 - axis;
+      for (const source of stones) {
+        const ds = Math.abs(source[axis] - edge);
+        if (!ds) continue;
+        for (const target of stones) {
+          const dt = Math.abs(target[axis] - edge);
+          if (!dt) continue;
+          const line = (source[along] * dt + target[along] * ds) / (ds + dt);
+          if (!Number.isInteger(line) ||
+              Math.abs(Math.abs(line - source[along]) - ds) > 2 ||
+              Math.abs(Math.abs(line - target[along]) - dt) > 2) continue;
+          const reflected = target.slice();
+          reflected[axis] = 2 * edge - target[axis];
+          for (const [index, x, y] of empty) {
+            if (kernel(x - source[0], y - source[1])) {
+              field[index] |= kernel(x - reflected[0], y - reflected[1]);
+            }
+          }
+        }
+      }
+    }
+  }
+  return masks;
+}
+
+const get = id => document.getElementById(id);
+const canvas = get('board');
+const ctx = canvas.getContext('2d');
+let history = [{ board: new Uint8Array(area), next: 1, last: -1 }];
+let cursor = 0;
+let selected = 9 * size + 9;
+let hovered = null;
+let masks;
+let calculatedFrame;
+let calculatedMirror;
+const position = () => history[cursor];
+const stoneName = color => color === 1 ? 'чёрный' : 'белый';
+const coordinate = index => letters[index % size] + (size - Math.floor(index / size));
+
+function circle(x, y, radius, fill) {
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+}
+
+function draw() {
+  const frame = position();
+  const mirror = get('mirror').checked;
+  if (frame !== calculatedFrame || mirror !== calculatedMirror) {
+    masks = calculate(frame.board, mirror);
+    calculatedFrame = frame;
+    calculatedMirror = mirror;
+  }
+  const influence = get('influence').checked;
+  const numbers = get('numbers').checked;
+  ctx.fillStyle = '#eac28b';
+  ctx.fillRect(0, 0, 800, 800);
+  if (influence) {
+    frame.board.forEach((color, index) => {
+      if (color) return;
+      const black = counts[masks[1][index]];
+      const white = counts[masks[2][index]];
+      if (!black && !white) return;
+      const difference = black - white;
+      const rgb = difference > 0 ? '46,83,159' : difference < 0 ? '170,46,43' : '118,64,146';
+      const alpha = .1 + .11 * (Math.abs(difference) || black);
+      const x = margin + (index % size) * spacing;
+      const y = margin + Math.floor(index / size) * spacing;
+      ctx.fillStyle = 'rgba(' + rgb + ',' + alpha + ')';
+      ctx.fillRect(x - 20, y - 20, 40, 40);
+    });
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '15px system-ui';
+  ctx.fillStyle = '#493521';
+  ctx.strokeStyle = '#6c4d30';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let i = 0; i < size; i++) {
+    const p = margin + i * spacing;
+    ctx.moveTo(margin, p);
+    ctx.lineTo(760, p);
+    ctx.moveTo(p, margin);
+    ctx.lineTo(p, 760);
+    ctx.fillText(letters[i], p, 16);
+    ctx.fillText(letters[i], p, 785);
+    ctx.fillText(size - i, 16, p);
+    ctx.fillText(size - i, 785, p);
+  }
+  ctx.stroke();
+  for (const x of [3, 9, 15]) {
+    for (const y of [3, 9, 15]) circle(margin + x * spacing, margin + y * spacing, 3, '#493521');
+  }
+  frame.board.forEach((color, index) => {
+    const x = margin + (index % size) * spacing;
+    const y = margin + Math.floor(index / size) * spacing;
+    if (color) {
+      const gradient = ctx.createRadialGradient(x - 6, y - 8, 1, x, y, 19);
+      gradient.addColorStop(0, color === 1 ? '#595653' : '#fff');
+      gradient.addColorStop(1, color === 1 ? '#151413' : '#d7d3ca');
+      circle(x + 1, y + 2, 19, '#684d3a55');
+      circle(x, y, 18.5, gradient);
+      if (index === frame.last) circle(x, y, 4, color === 1 ? '#fff' : '#282218');
+    } else if (influence && numbers) {
+      const delta = counts[masks[1][index]] - counts[masks[2][index]];
+      if (!delta && !masks[1][index]) return;
+      ctx.fillStyle = '#201d27';
+      ctx.font = 'bold 16px system-ui';
+      ctx.fillText(delta > 0 ? '+' + delta : delta, x + 9, y - 9);
+    }
+  });
+  const highlight = hovered ?? (document.activeElement === canvas ? selected : null);
+  if (highlight !== null) {
+    ctx.strokeStyle = '#284c8a';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(margin + highlight % size * spacing - 19,
+      margin + Math.floor(highlight / size) * spacing - 19, 38, 38);
+  }
+  showPoint(highlight);
+}
+
+function showPoint(index) {
+  let detail = 'Выберите пункт, чтобы увидеть значения влияния.';
+  if (index !== null) {
+    const color = position().board[index];
+    const black = counts[masks[1][index]];
+    const white = counts[masks[2][index]];
+    detail = coordinate(index) + ' · ' + (color ? stoneName(color) + ' камень' :
+      'чёрные ' + black + ' · белые ' + white + ' · разность ' + (black - white));
+  }
+  get('point').textContent = detail;
+}
+
+function render() {
+  get('step').textContent = 'Шаг ' + cursor + ' из ' + (history.length - 1);
+  get('first').disabled = get('back').disabled = cursor === 0;
+  get('last').disabled = get('forward').disabled = cursor === history.length - 1;
+  get('clear').disabled = !position().board.some(Boolean);
+  get('status').textContent = get('tool').value === 'alternate' ?
+    'Следующий камень — ' + stoneName(position().next) + '.' : '';
+  draw();
+}
+
+function goTo(step) {
+  cursor = Math.max(0, Math.min(history.length - 1, step));
+  render();
+}
+
+function record(frame) {
+  history.splice(cursor + 1, history.length, frame);
+  goTo(cursor + 1);
+}
+
+function place(index) {
+  const frame = position();
+  const mode = get('tool').value;
+  const color = mode === 'alternate' ? frame.next : Number(mode);
+  if (frame.board[index] === color) return;
+  const board = frame.board.slice();
+  board[index] = color;
+  record({ board, next: color ? 3 - color : frame.next, last: color ? index : -1 });
+}
+
+function locate(event) {
+  const bounds = canvas.getBoundingClientRect();
+  const x = Math.round(((event.clientX - bounds.left) * 800 / bounds.width - margin) / spacing);
+  const y = Math.round(((event.clientY - bounds.top) * 800 / bounds.height - margin) / spacing);
+  return x >= 0 && x < size && y >= 0 && y < size ? y * size + x : null;
+}
+
+canvas.addEventListener('pointermove', event => {
+  const point = locate(event);
+  if (hovered === point) return;
+  hovered = point;
+  draw();
+});
+canvas.addEventListener('pointerleave', () => { hovered = null; draw(); });
+canvas.addEventListener('click', event => {
+  const point = locate(event);
+  if (point === null) return;
+  selected = point;
+  place(point);
+  draw();
+});
+canvas.addEventListener('focus', draw);
+canvas.addEventListener('blur', draw);
+canvas.addEventListener('keydown', event => {
+  const x = selected % size;
+  const y = Math.floor(selected / size);
+  switch (event.key) {
+    case 'ArrowLeft': if (x > 0) selected--; break;
+    case 'ArrowRight': if (x < size - 1) selected++; break;
+    case 'ArrowUp': if (y > 0) selected -= size; break;
+    case 'ArrowDown': if (y < size - 1) selected += size; break;
+    case 'Enter':
+    case ' ': place(selected); break;
+    default: return;
+  }
+  event.preventDefault();
+  hovered = null;
+  draw();
+});
+get('first').onclick = () => goTo(0);
+get('back').onclick = () => goTo(cursor - 1);
+get('forward').onclick = () => goTo(cursor + 1);
+get('last').onclick = () => goTo(history.length - 1);
+get('clear').onclick = () => record({ board: new Uint8Array(area), next: 1, last: -1 });
+for (const id of ['tool', 'influence', 'mirror', 'numbers']) get(id).onchange = render;
+render();
+</script>
+</body>
+</html>
