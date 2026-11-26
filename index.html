@@ -38,6 +38,7 @@ p { margin: 8px 0; }
       <option value="0">Ластик</option>
     </select></label>
     <label>Модель <select id="model">
+      <option value="weighted">Взвешенные диагонали</option>
       <option value="ladder">По исходам ситё</option>
       <option value="geometry">Геометрические коридоры</option>
     </select></label>
@@ -306,6 +307,41 @@ function calculateLadders(board) {
   return { probes, totals };
 }
 
+const rayOffsets = [[0, 2], [0, 1], [1, 1], [1, 0], [2, 0]];
+
+function calculateWeighted(board) {
+  const totals = [null, new Uint8Array(area), new Uint8Array(area)];
+  const details = directions.map(([dx, dy]) => {
+    const ray = new Float64Array(area);
+    const sums = new Float64Array(area * rayOffsets.length);
+    const votes = new Int8Array(area);
+    const inside = (x, y) => x >= 0 && x < size && y >= 0 && y < size;
+    const read = (x, y) => inside(x, y) ? ray[y * size + x] : 0;
+
+    // Calculate from the far edge so the continuation is already available.
+    for (let row = 0; row < size; row++) {
+      const y = dy > 0 ? size - 1 - row : row;
+      for (let x = 0; x < size; x++) {
+        const index = y * size + x;
+        const stone = board[index];
+        ray[index] = (stone === 2 ? -1 : stone) + read(x + dx, y + dy) / 2;
+      }
+    }
+    for (let index = 0; index < area; index++) {
+      const x = index % size;
+      const y = Math.floor(index / size);
+      const values = rayOffsets.map(([u, v]) => read(x + u * dx, y + v * dy));
+      sums.set(values, index * rayOffsets.length);
+      const sum = values.reduce((total, value) => total + value, 0);
+      const vote = sum === 0 ? 0 : Math.sign(Math.max(...values) + Math.min(...values));
+      votes[index] = vote;
+      if (vote) totals[vote > 0 ? 1 : 2][index]++;
+    }
+    return { sums, votes };
+  });
+  return { details, totals };
+}
+
 const get = id => document.getElementById(id);
 const canvas = get('board');
 const ctx = canvas.getContext('2d');
@@ -315,6 +351,7 @@ let selected = 9 * size + 9;
 let hovered = null;
 let totals;
 let ladderResults;
+let weightedResults;
 let calculatedModel;
 let calculatedFrame;
 let calculatedMirror;
@@ -333,11 +370,12 @@ function draw() {
   const frame = position();
   const model = get('model').value;
   const isLadder = model === 'ladder';
-  get('mirror').disabled = isLadder;
-  const mirror = !isLadder && get('mirror').checked;
+  get('mirror').disabled = model !== 'geometry';
+  const mirror = model === 'geometry' && get('mirror').checked;
   if (frame !== calculatedFrame || mirror !== calculatedMirror || model !== calculatedModel) {
     ladderResults = isLadder ? calculateLadders(frame.board) : null;
-    totals = ladderResults?.totals ?? calculate(frame.board, mirror).map(field =>
+    weightedResults = model === 'weighted' ? calculateWeighted(frame.board) : null;
+    totals = weightedResults?.totals ?? ladderResults?.totals ?? calculate(frame.board, mirror).map(field =>
       field && field.map(mask => counts[mask]));
     calculatedFrame = frame;
     calculatedMirror = mirror;
@@ -423,7 +461,19 @@ function showPoint(index) {
   }
   get('point').textContent = detail;
   const symbols = ['0', '1', '—', '?'];
-  get('probes').textContent = ladderResults && index !== null ?
+  const probes = get('probes');
+  probes.title = '';
+  if (weightedResults && index !== null) {
+    const start = index * rayOffsets.length;
+    const format = new Intl.NumberFormat('ru', { maximumSignificantDigits: 6 });
+    probes.textContent = weightedResults.details.map(({ sums, votes }, d) =>
+      ladderNames[d] + ' [' + Array.from(sums.slice(start, start + rayOffsets.length),
+        value => format.format(value)).join('; ') + '] → ' + votes[index]).join(' · ');
+    probes.title = 'Пять сумм лучей и итоговый голос по каждому направлению.';
+    return;
+  }
+  if (ladderResults) probes.title = 'Крестики / квадратики. 1 — выход, 0 — захват, — неприменимо, ? — не решено.';
+  probes.textContent = ladderResults && index !== null ?
     [1, 2].map(color => stoneName(color) + ': ' +
       ladderResults.probes[color].map((matrix, d) => ladderNames[d] + ' ' +
         symbols[matrix[index * 2]] + '/' + symbols[matrix[index * 2 + 1]]).join(' · '))
