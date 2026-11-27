@@ -131,11 +131,13 @@ function chains(board) {
 // A cell has four sectors, one against each side, starting at the top.
 const cellSectors = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 
-function makeScreen(source, enemies, allowed = () => 15) {
-  const blockers = enemies.map(([x, y]) => {
+function makeScreen(source, enemies, allowed = () => 15, realSource = source) {
+  const blockers = enemies.map(({ x, y, twoLiberties }) => {
     const dx = x - source[0];
     const dy = y - source[1];
-    return { x, y, mask: kernel(dx, dy) & allowed(dx, dy) };
+    const adjacent = Math.abs(x - realSource[0]) + Math.abs(y - realSource[1]) === 1;
+    const mask = !twoLiberties || adjacent ? kernel(dx, dy) & allowed(dx, dy) : 0;
+    return { x, y, mask, twoLiberties };
   }).filter(blocker => blocker.mask);
 
   return (x, y, directionsMask) => {
@@ -153,7 +155,7 @@ function makeScreen(source, enemies, allowed = () => 15) {
         const offset = a * dx - b * dy;
         if (Math.abs(offset) < 2) {
           sectors &= ~((1 << d) * 0x1111);
-        } else {
+        } else if (!blocker.twoLiberties) {
           cellSectors.forEach(([sx, sy], sector) => {
             if (offset * (a * sx - b * sy) < 0) sectors &= ~(1 << (d + sector * 4));
           });
@@ -167,14 +169,20 @@ function makeScreen(source, enemies, allowed = () => 15) {
 function calculate(board, mirror) {
   const masks = [null, new Uint16Array(area), new Uint16Array(area)];
   const occupied = [null, [], []];
+  const groups = chains(board).map(({ color, stones }) => {
+    const [x, y] = stones[0];
+    const twoLiberties = inspectChain(board, y * size + x).liberties.size === 2;
+    for (const [sx, sy] of stones) occupied[color].push({ x: sx, y: sy, twoLiberties });
+    return { color, stones, twoLiberties };
+  });
   const empty = [];
   board.forEach((color, index) => {
     const x = index % size;
     const y = Math.floor(index / size);
     if (!color) empty.push([index, x, y]);
-    else occupied[color].push([x, y]);
   });
-  for (const { color, stones } of chains(board)) {
+  for (const { color, stones, twoLiberties } of groups) {
+    if (twoLiberties) continue;
     const field = masks[color];
     const enemies = occupied[3 - color];
     const screens = new Map(stones.map(source => [source,
@@ -204,7 +212,7 @@ function calculate(board, mirror) {
               Math.abs(Math.abs(line - target[along]) - dt) > 2) continue;
           const reflected = target.slice();
           reflected[axis] = 2 * edge - target[axis];
-          const reflectedScreen = makeScreen(reflected, enemies);
+          const reflectedScreen = makeScreen(reflected, enemies, undefined, target);
           for (const [index, x, y] of empty) {
             const dx = x - source[0];
             const dy = y - source[1];
