@@ -128,19 +128,65 @@ function chains(board) {
   return groups;
 }
 
+// A cell has four sectors, one against each side, starting at the top.
+const cellSectors = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+
+function makeScreen(source, enemies, allowed = () => 15) {
+  const blockers = enemies.map(([x, y]) => {
+    const dx = x - source[0];
+    const dy = y - source[1];
+    return { x, y, mask: kernel(dx, dy) & allowed(dx, dy) };
+  }).filter(blocker => blocker.mask);
+
+  return (x, y, directionsMask) => {
+    let sectors = directionsMask * 0x1111;
+    for (const blocker of blockers) {
+      const active = directionsMask & blocker.mask;
+      if (!active) continue;
+      const dx = x - blocker.x;
+      const dy = y - blocker.y;
+      const shadow = active & kernel(dx, dy);
+      if (!shadow) continue;
+      for (let d = 0; d < directions.length; d++) {
+        if (!(shadow & (1 << d))) continue;
+        const [a, b] = directions[d];
+        const offset = a * dx - b * dy;
+        if (Math.abs(offset) < 2) {
+          sectors &= ~((1 << d) * 0x1111);
+        } else {
+          cellSectors.forEach(([sx, sy], sector) => {
+            if (offset * (a * sx - b * sy) < 0) sectors &= ~(1 << (d + sector * 4));
+          });
+        }
+      }
+    }
+    return sectors;
+  };
+}
+
 function calculate(board, mirror) {
-  const masks = [null, new Uint8Array(area), new Uint8Array(area)];
+  const masks = [null, new Uint16Array(area), new Uint16Array(area)];
+  const occupied = [null, [], []];
   const empty = [];
   board.forEach((color, index) => {
-    if (!color) empty.push([index, index % size, Math.floor(index / size)]);
+    const x = index % size;
+    const y = Math.floor(index / size);
+    if (!color) empty.push([index, x, y]);
+    else occupied[color].push([x, y]);
   });
   for (const { color, stones } of chains(board)) {
     const field = masks[color];
+    const enemies = occupied[3 - color];
+    const screens = new Map(stones.map(source => [source,
+      makeScreen(source, enemies, (dx, dy) => ~blockedLadderDirections(source, dx, dy))]));
     for (const source of stones) {
       const [sx, sy] = source;
       for (const [index, x, y] of empty) {
         const direct = kernel(x - sx, y - sy);
-        if (direct) field[index] |= direct & ~blockedLadderDirections(source, x - sx, y - sy);
+        if (direct) {
+          const allowed = direct & ~blockedLadderDirections(source, x - sx, y - sy);
+          field[index] |= screens.get(source)(x, y, allowed);
+        }
       }
     }
     if (!mirror) continue;
@@ -158,6 +204,7 @@ function calculate(board, mirror) {
               Math.abs(Math.abs(line - target[along]) - dt) > 2) continue;
           const reflected = target.slice();
           reflected[axis] = 2 * edge - target[axis];
+          const reflectedScreen = makeScreen(reflected, enemies);
           for (const [index, x, y] of empty) {
             const dx = x - source[0];
             const dy = y - source[1];
@@ -165,7 +212,13 @@ function calculate(board, mirror) {
             if (!direct) continue;
             const blocked = blockedLadderDirections(source, dx, dy);
             if (direct & ~blocked) {
-              field[index] |= kernel(x - reflected[0], y - reflected[1]) & ~blocked;
+              const realCoverage = screens.get(source)(x, y, direct & ~blocked);
+              const reflectedMask = kernel(x - reflected[0], y - reflected[1]) & ~blocked;
+              const reflectedCoverage = reflectedScreen(x, y, reflectedMask);
+              for (let shift = 0; shift < 16; shift += 4) {
+                const sector = 15 << shift;
+                if (realCoverage & sector) field[index] |= reflectedCoverage & sector;
+              }
             }
           }
         }
@@ -355,6 +408,7 @@ let hovered = null;
 let totals;
 let ladderResults;
 let weightedResults;
+let geometryMasks;
 let calculatedModel;
 let calculatedFrame;
 let calculatedMirror;
@@ -369,6 +423,13 @@ function circle(x, y, radius, fill) {
   ctx.fill();
 }
 
+function influenceColor(black, white, intensity) {
+  const difference = black - white;
+  const rgb = difference > 0 ? '46,83,159' : difference < 0 ? '170,46,43' : '118,64,146';
+  const alpha = .1 + intensity * (Math.abs(difference) || black);
+  return 'rgba(' + rgb + ',' + alpha + ')';
+}
+
 function draw() {
   const frame = position();
   const model = get('model').value;
@@ -378,8 +439,10 @@ function draw() {
   if (frame !== calculatedFrame || mirror !== calculatedMirror || model !== calculatedModel) {
     ladderResults = isLadder ? calculateLadders(frame.board) : null;
     weightedResults = model === 'weighted' ? calculateWeighted(frame.board) : null;
-    totals = weightedResults?.totals ?? ladderResults?.totals ?? calculate(frame.board, mirror).map(field =>
-      field && field.map(mask => counts[mask]));
+    geometryMasks = model === 'geometry' ? calculate(frame.board, mirror) : null;
+    totals = weightedResults?.totals ?? ladderResults?.totals ?? geometryMasks.map(field =>
+      field && Float32Array.from(field, mask => cellSectors.reduce((sum, _, sector) =>
+        sum + counts[(mask >>> (sector * 4)) & 15], 0) / 4));
     calculatedFrame = frame;
     calculatedMirror = mirror;
     calculatedModel = model;
@@ -394,13 +457,31 @@ function draw() {
       const black = totals[1][index];
       const white = totals[2][index];
       if (!black && !white) return;
-      const difference = black - white;
-      const rgb = difference > 0 ? '46,83,159' : difference < 0 ? '170,46,43' : '118,64,146';
-      const alpha = .1 + (isLadder ? .055 : .11) * (Math.abs(difference) || black);
       const x = margin + (index % size) * spacing;
       const y = margin + Math.floor(index / size) * spacing;
-      ctx.fillStyle = 'rgba(' + rgb + ',' + alpha + ')';
-      ctx.fillRect(x - 20, y - 20, 40, 40);
+      const half = spacing / 2;
+      if (geometryMasks && [1, 2].some(color => {
+        const mask = geometryMasks[color][index];
+        return mask !== (mask & 15) * 0x1111;
+      })) {
+        const corners = [[-half, -half], [half, -half], [half, half], [-half, half]];
+        corners.forEach(([ax, ay], sector) => {
+          const shift = sector * 4;
+          const b = counts[(geometryMasks[1][index] >>> shift) & 15];
+          const w = counts[(geometryMasks[2][index] >>> shift) & 15];
+          if (!b && !w) return;
+          const [bx, by] = corners[(sector + 1) % corners.length];
+          ctx.fillStyle = influenceColor(b, w, .11);
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + ax, y + ay);
+          ctx.lineTo(x + bx, y + by);
+          ctx.fill();
+        });
+      } else {
+        ctx.fillStyle = influenceColor(black, white, isLadder ? .055 : .11);
+        ctx.fillRect(x - half, y - half, spacing, spacing);
+      }
     });
   }
   ctx.textAlign = 'center';
