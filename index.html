@@ -17,6 +17,11 @@ canvas { display: block; width: 100%; height: auto; border-radius: 8px; cursor: 
 p { margin: 8px 0; }
 .legend { color: #544936; font-size: .9rem; }
 #status, #point { min-height: 1.4em; }
+label[hidden] { display: none; }
+h2 { font-size: 1.15rem; margin: 0; }
+textarea { box-sizing: border-box; width: 100%; min-height: 14rem; resize: vertical;
+  padding: 8px; border: 1px solid #b9a98d; border-radius: 6px; background: #fffdf7;
+  color: inherit; font: .85rem ui-monospace, monospace; }
 </style>
 </head>
 <body>
@@ -42,11 +47,30 @@ p { margin: 8px 0; }
       <option value="ladder">По исходам ситё</option>
       <option value="geometry">Геометрические коридоры</option>
     </select></label>
+    <label>Раскраска <select id="paint-mode">
+      <option value="automatic">Расчётная</option>
+      <option value="manual">Ручная</option>
+    </select></label>
+    <label id="brush-label" hidden>Кисть <select id="brush">
+      <option value="1">Чёрные · синий</option>
+      <option value="-1">Белые · красный</option>
+      <option value="0">Ластик</option>
+    </select></label>
     <label><input type="checkbox" id="influence" checked> Влияние</label>
     <label><input type="checkbox" id="mirror" checked> Зеркало</label>
     <label><input type="checkbox" id="numbers"> Числа</label>
   </div>
-  <canvas id="board" width="800" height="800" tabindex="0" aria-label="Гобан 19 на 19. Стрелки выбирают пункт, Enter ставит камень."></canvas>
+  <canvas id="board" width="800" height="800" tabindex="0" aria-label="Гобан 19 на 19. Стрелки выбирают пункт, Enter применяет выбранный инструмент."></canvas>
+  <section aria-labelledby="matrices-title">
+    <div class="options">
+      <h2 id="matrices-title">Матрицы позиции и влияния</h2>
+      <button id="copy-matrices">Копировать JSON</button>
+      <span id="copy-status" class="legend" role="status"></span>
+    </div>
+    <p id="matrix-key" class="legend">Строки сверху вниз, от 19 до 1. Столбцы слева направо, от A до T, без I.
+      Камни: 0 — пусто, 1 — чёрный, 2 — белый. Ручная разметка: 0 — без отметки, 1 — чёрные, −1 — белые.</p>
+    <textarea id="matrices" aria-labelledby="matrices-title" aria-describedby="matrix-key" readonly wrap="off" spellcheck="false"></textarea>
+  </section>
   <p id="point" class="legend"></p>
   <p id="probes" class="legend" title="Крестики / квадратики. 1 — выход, 0 — захват, — неприменимо, ? — не решено."></p>
   <p id="status" class="legend" role="status"></p>
@@ -409,7 +433,13 @@ function calculateWeighted(board) {
 const get = id => document.getElementById(id);
 const canvas = get('board');
 const ctx = canvas.getContext('2d');
-let history = [{ board: new Uint8Array(area), next: 1, last: -1 }];
+const emptyFrame = () => ({
+  board: new Uint8Array(area),
+  paint: new Int8Array(area),
+  next: 1,
+  last: -1
+});
+let history = [emptyFrame()];
 let cursor = 0;
 let selected = 9 * size + 9;
 let hovered = null;
@@ -418,9 +448,10 @@ let ladderResults;
 let weightedResults;
 let geometryMasks;
 let calculatedModel;
-let calculatedFrame;
+let calculatedBoard;
 let calculatedMirror;
 const position = () => history[cursor];
+const manualMode = () => get('paint-mode').value === 'manual';
 const stoneName = color => color === 1 ? 'чёрный' : 'белый';
 const coordinate = index => letters[index % size] + (size - Math.floor(index / size));
 
@@ -444,30 +475,39 @@ function draw() {
   const isLadder = model === 'ladder';
   get('mirror').disabled = model !== 'geometry';
   const mirror = model === 'geometry' && get('mirror').checked;
-  if (frame !== calculatedFrame || mirror !== calculatedMirror || model !== calculatedModel) {
+  if (frame.board !== calculatedBoard || mirror !== calculatedMirror || model !== calculatedModel) {
     ladderResults = isLadder ? calculateLadders(frame.board) : null;
     weightedResults = model === 'weighted' ? calculateWeighted(frame.board) : null;
     geometryMasks = model === 'geometry' ? calculate(frame.board, mirror) : null;
     totals = weightedResults?.totals ?? ladderResults?.totals ?? geometryMasks.map(field =>
       field && Float32Array.from(field, mask => cellSectors.reduce((sum, _, sector) =>
         sum + counts[(mask >>> (sector * 4)) & 15], 0) / 4));
-    calculatedFrame = frame;
+    calculatedBoard = frame.board;
     calculatedMirror = mirror;
     calculatedModel = model;
   }
-  const influence = get('influence').checked;
+  const manual = manualMode();
+  const influence = manual || get('influence').checked;
   const numbers = get('numbers').checked;
   ctx.fillStyle = '#eac28b';
   ctx.fillRect(0, 0, 800, 800);
   if (influence) {
     frame.board.forEach((color, index) => {
       if (color) return;
-      const black = totals[1][index];
-      const white = totals[2][index];
-      if (!black && !white) return;
       const x = margin + (index % size) * spacing;
       const y = margin + Math.floor(index / size) * spacing;
       const half = spacing / 2;
+      if (manual) {
+        const paint = frame.paint[index];
+        if (paint) {
+          ctx.fillStyle = influenceColor(Number(paint > 0), Number(paint < 0), .45);
+          ctx.fillRect(x - half, y - half, spacing, spacing);
+        }
+        return;
+      }
+      const black = totals[1][index];
+      const white = totals[2][index];
+      if (!black && !white) return;
       if (geometryMasks && [1, 2].some(color => {
         const mask = geometryMasks[color][index];
         return mask !== (mask & 15) * 0x1111;
@@ -524,7 +564,7 @@ function draw() {
       circle(x + 1, y + 2, 19, '#684d3a55');
       circle(x, y, 18.5, gradient);
       if (index === frame.last) circle(x, y, 4, color === 1 ? '#fff' : '#282218');
-    } else if (influence && numbers) {
+    } else if (!manual && influence && numbers) {
       const delta = totals[1][index] - totals[2][index];
       if (!delta && !totals[1][index]) return;
       ctx.fillStyle = '#201d27';
@@ -572,14 +612,50 @@ function showPoint(index) {
       .join(' | ') : '';
 }
 
+function formatMatrix(values) {
+  return '[' + Array.from({ length: size }, (_, row) => {
+    const start = row * size;
+    return JSON.stringify(Array.from(values.slice(start, start + size)));
+  }).join(',\n ') + ']';
+}
+
+function updateMatrices() {
+  const frame = position();
+  const matrices = {
+    stones: frame.board,
+    black: totals[1],
+    white: totals[2],
+    difference: Float64Array.from(totals[1], (black, index) => black - totals[2][index]),
+    manual: frame.paint
+  };
+  const header = [
+    '  "model": ' + JSON.stringify(calculatedModel),
+    '  "mirror": ' + calculatedMirror
+  ];
+  const fields = Object.entries(matrices).map(([name, values]) =>
+    '  ' + JSON.stringify(name) + ': ' + formatMatrix(values));
+  const output = get('matrices');
+  const value = '{\n' + [...header, ...fields].join(',\n') + '\n}';
+  if (output.value !== value) {
+    output.value = value;
+    get('copy-status').textContent = '';
+  }
+}
+
 function render() {
   get('step').textContent = 'Шаг ' + cursor + ' из ' + (history.length - 1);
   get('first').disabled = get('back').disabled = cursor === 0;
   get('last').disabled = get('forward').disabled = cursor === history.length - 1;
-  get('clear').disabled = !position().board.some(Boolean);
-  get('status').textContent = get('tool').value === 'alternate' ?
+  const frame = position();
+  const manual = manualMode();
+  get('clear').disabled = !frame.board.some(Boolean) && !frame.paint.some(Boolean);
+  get('brush-label').hidden = !manual;
+  for (const id of ['tool', 'influence', 'numbers']) get(id).disabled = manual;
+  get('status').textContent = manual ? 'Выберите кисть и отметьте свободные пункты.' :
+    get('tool').value === 'alternate' ?
     'Следующий камень — ' + stoneName(position().next) + '.' : '';
   draw();
+  updateMatrices();
 }
 
 function goTo(step) {
@@ -594,12 +670,22 @@ function record(frame) {
 
 function place(index) {
   const frame = position();
+  if (manualMode()) {
+    const color = Number(get('brush').value);
+    if (frame.board[index] || frame.paint[index] === color) return;
+    const paint = frame.paint.slice();
+    paint[index] = color;
+    record({ ...frame, paint });
+    return;
+  }
   const mode = get('tool').value;
   const color = mode === 'alternate' ? frame.next : Number(mode);
   if (frame.board[index] === color) return;
   const board = frame.board.slice();
   board[index] = color;
-  record({ board, next: color ? 3 - color : frame.next, last: color ? index : -1 });
+  const paint = frame.paint.slice();
+  paint[index] = 0;
+  record({ board, paint, next: color ? 3 - color : frame.next, last: color ? index : -1 });
 }
 
 function locate(event) {
@@ -645,8 +731,20 @@ get('first').onclick = () => goTo(0);
 get('back').onclick = () => goTo(cursor - 1);
 get('forward').onclick = () => goTo(cursor + 1);
 get('last').onclick = () => goTo(history.length - 1);
-get('clear').onclick = () => record({ board: new Uint8Array(area), next: 1, last: -1 });
-for (const id of ['tool', 'model', 'influence', 'mirror', 'numbers']) get(id).onchange = render;
+get('clear').onclick = () => record(emptyFrame());
+get('copy-matrices').onclick = async () => {
+  const output = get('matrices');
+  const status = get('copy-status');
+  try {
+    await navigator.clipboard.writeText(output.value);
+    status.textContent = 'Скопировано';
+  } catch {
+    output.focus();
+    output.select();
+    status.textContent = 'Текст выделен. Скопируйте его сочетанием Ctrl+C или ⌘C.';
+  }
+};
+for (const id of ['tool', 'model', 'paint-mode', 'influence', 'mirror', 'numbers']) get(id).onchange = render;
 render();
 </script>
 </body>
