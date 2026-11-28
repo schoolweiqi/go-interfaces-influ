@@ -46,6 +46,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 14rem; resize: verti
       <option value="weighted">Взвешенные диагонали</option>
       <option value="ladder">По исходам ситё</option>
       <option value="geometry">Геометрические коридоры</option>
+      <option value="operator">Оператор</option>
     </select></label>
     <label>Раскраска <select id="paint-mode">
       <option value="automatic">Расчётная</option>
@@ -76,6 +77,7 @@ textarea { box-sizing: border-box; width: 100%; min-height: 14rem; resize: verti
   <p id="status" class="legend" role="status"></p>
   <p class="legend">Свободная расстановка. Синий — перевес чёрных, красный — белых, фиолетовый — равное ненулевое влияние.</p>
 </main>
+<script src="./influence-operator.js"></script>
 <script>
 'use strict';
 const size = 19;
@@ -479,7 +481,8 @@ function draw() {
     ladderResults = isLadder ? calculateLadders(frame.board) : null;
     weightedResults = model === 'weighted' ? calculateWeighted(frame.board) : null;
     geometryMasks = model === 'geometry' ? calculate(frame.board, mirror) : null;
-    totals = weightedResults?.totals ?? ladderResults?.totals ?? geometryMasks.map(field =>
+    const operatorTotals = model === 'operator' ? calculateOperatorInfluence(frame.board, size) : null;
+    totals = weightedResults?.totals ?? ladderResults?.totals ?? operatorTotals ?? geometryMasks.map(field =>
       field && Float32Array.from(field, mask => cellSectors.reduce((sum, _, sector) =>
         sum + counts[(mask >>> (sector * 4)) & 15], 0) / 4));
     calculatedBoard = frame.board;
